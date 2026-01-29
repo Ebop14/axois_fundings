@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .drafter import EmailDrafter
 from .email_finder import EmailFinder
+from .founder_finder import FounderFinder
 from .gmail_client import GmailClient
 from .parser import NewsletterParser
 
@@ -59,8 +60,9 @@ def get_env_int(key: str, default: int) -> int:
 @click.command()
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.option("--dry-run", is_flag=True, help="Don't create drafts, just show what would be done")
-@click.option("--max-emails", "-n", default=10, help="Maximum number of emails to process")
-def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
+@click.option("--max-emails", "-n", default=10, help="Maximum number of newsletter emails to process")
+@click.option("--max-drafts", "-d", default=None, type=int, help="Maximum number of outreach drafts to create")
+def cli(verbose: bool, dry_run: bool, max_emails: int, max_drafts: int) -> None:
     """Process Axios Pro Rata newsletters and create outreach drafts."""
     # Load environment variables from .env file
     env_path = Path(__file__).parent.parent / ".env"
@@ -112,6 +114,12 @@ def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
         rate_limit_delay=get_env_float("BOUNCEBAN_RATE_LIMIT_DELAY", 1.0),
     )
 
+    founder_finder = FounderFinder(
+        grok_api_key=get_env("GROK_API_KEY"),
+        grok_model=get_env("GROK_MODEL", "grok-3"),
+        grok_base_url=get_env("GROK_BASE_URL", "https://api.x.ai/v1"),
+    )
+
     drafter = EmailDrafter(
         parser=parser,
         subject_template=get_env(
@@ -151,16 +159,54 @@ def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
         click.echo(f"  Found {len(fundings)} funding announcement(s)")
         total_fundings += len(fundings)
 
+        # Extract URLs from newsletter for web search
+        raw_html = parser.get_last_raw_html()
+        newsletter_urls = founder_finder.extract_urls_from_html(raw_html) if raw_html else []
+
         for funding in fundings:
             click.echo(f"\n  Company: {funding.company_name}")
             click.echo(f"  Funding: {funding.funding_amount}")
-            click.echo(f"  Founders: {', '.join(funding.founder_names)}")
 
             if not funding.company_domain:
                 click.echo("  ⚠ No domain found, skipping email discovery")
                 continue
 
             click.echo(f"  Domain: {funding.company_domain}")
+
+            # Web search for founder names and enrichment content
+            needs_founders = funding.needs_founder_search
+            click.echo(
+                f"  🔍 Searching web for {'founder names and ' if needs_founders else ''}enrichment data..."
+            )
+            search_result = founder_finder.find_founders(
+                company_name=funding.company_name,
+                company_domain=funding.company_domain,
+                article_urls=newsletter_urls,
+            )
+
+            # Store enrichment content for personalized outreach
+            if search_result.scraped_content:
+                funding.enrichment_content = search_result.scraped_content
+                click.echo("  ✓ Retrieved enrichment content from web")
+
+            # Update founder names if we found them
+            if needs_founders:
+                if search_result.founder_names:
+                    funding.founder_names = search_result.founder_names
+                    click.echo(
+                        f"  ✓ Found founders: {', '.join(funding.founder_names)}"
+                    )
+                    click.echo(f"    Source: {search_result.source_url or 'N/A'}")
+                    click.echo(f"    Confidence: {search_result.confidence}")
+                else:
+                    click.echo("  ✗ Could not find founder names via web search")
+                    continue
+
+            if not funding.founder_names:
+                click.echo("  ⚠ No founder names available, skipping")
+                continue
+
+            click.echo(f"  Founders: {', '.join(funding.founder_names)}")
 
             for founder_name in funding.founder_names:
                 click.echo(f"  Searching for email: {founder_name}...")
@@ -191,7 +237,20 @@ def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
                     click.echo(f"    ✓ Draft created for {draft.to}")
 
                 total_drafts += 1
+
+                # Check if we've hit the draft limit
+                if max_drafts and total_drafts >= max_drafts:
+                    click.echo(f"\n  ⚠ Reached draft limit ({max_drafts})")
+                    break
+
+                break  # Move to next company after successful draft
+
+            # Check if we've hit the draft limit (outer loop)
+            if max_drafts and total_drafts >= max_drafts:
                 break
+
+        if max_drafts and total_drafts >= max_drafts:
+            break
 
         if not dry_run:
             gmail.mark_as_processed(email["id"], email["label_id"])
@@ -204,6 +263,8 @@ def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
     click.echo(f"  Drafts {'would be ' if dry_run else ''}created: {total_drafts}")
 
     parser.close()
+    founder_finder.close()
+    email_finder.close()
 
 
 if __name__ == "__main__":

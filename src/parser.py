@@ -22,6 +22,8 @@ class FundingInfo:
     company_domain: Optional[str]
     description: Optional[str]
     raw_text: str
+    article_urls: Optional[list[str]] = None  # URLs extracted from newsletter
+    enrichment_content: Optional[str] = None  # Scraped content from web search
 
     @property
     def founder_first_name(self) -> str:
@@ -29,6 +31,11 @@ class FundingInfo:
         if self.founder_names:
             return self.founder_names[0].split()[0]
         return ""
+
+    @property
+    def needs_founder_search(self) -> bool:
+        """Check if this funding info needs founder name enrichment."""
+        return not self.founder_names and bool(self.company_domain)
 
 
 class NewsletterParser:
@@ -47,11 +54,15 @@ class NewsletterParser:
 
     def parse_newsletter(self, email_content: dict) -> list[FundingInfo]:
         """Extract funding information from newsletter email."""
-        content = email_content.get("body_html") or email_content.get("body_text", "")
+        raw_html = email_content.get("body_html", "")
+        content = raw_html or email_content.get("body_text", "")
 
         if not content:
             logger.warning("No content found in email")
             return []
+
+        # Store raw HTML for URL extraction
+        self._last_raw_html = raw_html
 
         content = self._clean_html(content)
 
@@ -62,6 +73,10 @@ class NewsletterParser:
             return []
 
         return self._parse_response(response, content)
+
+    def get_last_raw_html(self) -> str:
+        """Get the raw HTML from the last parsed newsletter."""
+        return getattr(self, "_last_raw_html", "")
 
     def _clean_html(self, html: str) -> str:
         """Remove HTML tags and clean up content."""
@@ -167,12 +182,15 @@ Return ONLY the JSON array, no other text."""
                     description=item.get("description"),
                     raw_text=raw_text[:500],
                 )
-                if info.company_name and info.founder_names:
+                # Include records with company name - founder names can be enriched later
+                if info.company_name:
+                    if not info.founder_names:
+                        logger.info(
+                            f"Company '{info.company_name}' missing founders - will attempt web search"
+                        )
                     results.append(info)
                 else:
-                    logger.warning(
-                        f"Skipping incomplete funding info: {item}"
-                    )
+                    logger.warning(f"Skipping record without company name: {item}")
             except Exception as e:
                 logger.error(f"Error creating FundingInfo: {e}")
 
@@ -181,17 +199,26 @@ Return ONLY the JSON array, no other text."""
 
     def generate_opening_line(self, funding_info: FundingInfo) -> str:
         """Generate a personalized opening line using Grok-3."""
+        # Build enrichment context from web-scraped content
+        enrichment_section = ""
+        if funding_info.enrichment_content:
+            enrichment_section = f"""
+Additional context scraped from their website/news articles:
+{funding_info.enrichment_content[:3000]}
+"""
+
         prompt = f"""Write a brief, personalized opening line for a sales email to {funding_info.founder_names[0]},
 founder of {funding_info.company_name} who just raised {funding_info.funding_amount}.
 
 Company description: {funding_info.description or 'N/A'}
 Investors: {', '.join(funding_info.investors) if funding_info.investors else 'N/A'}
-
+{enrichment_section}
 The opening should:
 - Congratulate them on the funding
-- Show you understand what their company does
+- Reference something SPECIFIC about their company (product, mission, recent news, or market they serve)
+- Show genuine understanding of what they're building
 - Be concise (1-2 sentences max)
-- Sound natural, not salesy
+- Sound natural and thoughtful, not generic or salesy
 
 Return ONLY the opening line, no quotes or other text."""
 
