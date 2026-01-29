@@ -1,8 +1,7 @@
 # Credentials and secrets
 credentials/
-config/config.yaml
+.env
 *.json
-!config/*.example.yaml
 
 # Python
 __pycache__/
@@ -29,7 +28,6 @@ wheels/
 # Virtual environments
 venv/
 env/
-.env
 
 # IDE
 .idea/

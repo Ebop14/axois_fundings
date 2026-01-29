@@ -22,7 +22,7 @@ A Python CLI tool that processes Axios Pro Rata newsletter emails, extracts comp
 ### 1. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ### 2. Google Cloud Setup
@@ -39,40 +39,41 @@ pip install -r requirements.txt
    - Download the JSON file
 5. Save the downloaded file as `credentials/credentials.json`
 
-### 3. xAI API Key
-
-1. Get an API key from [xAI](https://x.ai/)
-2. Add it to your config file (see below)
-
-### 4. Configuration
+### 3. Environment Configuration
 
 ```bash
-cp config/config.example.yaml config/config.yaml
+cp .env.example .env
 ```
 
-Edit `config/config.yaml` with your settings:
+Edit `.env` with your settings:
 
-```yaml
-grok:
-  api_key: "your-xai-api-key-here"
-  model: "grok-3"
+```bash
+# xAI Grok-3 API settings
+GROK_API_KEY=your-xai-api-key-here
+GROK_MODEL=grok-3
+GROK_BASE_URL=https://api.x.ai/v1
 
-gmail:
-  credentials_file: "credentials/credentials.json"
-  token_file: "credentials/token.json"
-  sender_filter: "axios.com"
-  processed_label: "Axios-Processed"
+# Gmail settings
+GMAIL_CREDENTIALS_FILE=credentials/credentials.json
+GMAIL_TOKEN_FILE=credentials/token.json
+GMAIL_SENDER_FILTER=axios.com
+GMAIL_PROCESSED_LABEL=Axios-Processed
 
-smtp:
-  timeout: 10
-  rate_limit_delay: 2.0
+# SMTP verification settings
+SMTP_TIMEOUT=10
+SMTP_RATE_LIMIT_DELAY=2.0
+SMTP_FROM_EMAIL=verify@example.com
 
-email:
-  subject_template: "Congrats on the {funding_amount} raise, {founder_first_name}!"
-  sender_name: "Your Name"
+# Email template settings
+EMAIL_SUBJECT_TEMPLATE=Congrats on the {funding_amount} raise, {founder_first_name}!
+EMAIL_SENDER_NAME=Your Name
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FILE=axios_fundings.log
 ```
 
-### 5. First Run
+### 4. First Run
 
 On first run, a browser window will open for Gmail OAuth consent. Grant the requested permissions.
 
@@ -80,19 +81,16 @@ On first run, a browser window will open for Gmail OAuth consent. Grant the requ
 
 ```bash
 # Process new newsletter emails and create drafts
-python -m src.main
+python3 -m src.main
 
 # Process with verbose logging
-python -m src.main --verbose
+python3 -m src.main --verbose
 
 # Dry run (show what would be done without creating drafts)
-python -m src.main --dry-run
+python3 -m src.main --dry-run
 
 # Process specific number of emails
-python -m src.main --max-emails 5
-
-# Use custom config file
-python -m src.main --config path/to/config.yaml
+python3 -m src.main --max-emails 5
 ```
 
 ## How It Works
@@ -122,9 +120,8 @@ axios_fundings/
 │   ├── parser.py         # Grok-3 newsletter extraction
 │   ├── email_finder.py   # Email permutation + SMTP verification
 │   └── drafter.py        # Email template/generation
-├── config/
-│   └── config.example.yaml
 ├── credentials/          # OAuth tokens (gitignored)
+├── .env.example          # Environment template
 ├── requirements.txt
 ├── setup.py
 └── README.md
@@ -164,12 +161,12 @@ Rate limiting is enforced to avoid blacklisting.
 - Ensure Gmail API is enabled in Google Cloud Console
 
 ### No Emails Found
-- Check the `sender_filter` in config matches Axios sender
+- Check the `GMAIL_SENDER_FILTER` in .env matches Axios sender
 - Ensure emails are unread and not already labeled
 
 ### SMTP Verification Fails
 - Some mail servers block verification attempts
-- Increase `timeout` in config
+- Increase `SMTP_TIMEOUT` in .env
 - Try from a different network
 
 ## License

@@ -1,13 +1,11 @@
-"""Email discovery via permutation generation and SMTP verification."""
+"""Email discovery via permutation generation and BounceBan API verification."""
 
 import logging
-import smtplib
-import socket
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-import dns.resolver
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -19,23 +17,30 @@ class EmailVerificationResult:
     email: str
     is_valid: bool
     is_catch_all: bool
-    smtp_code: Optional[int]
+    score: Optional[int]
     message: str
 
 
 class EmailFinder:
-    """Find and verify founder email addresses."""
+    """Find and verify founder email addresses using BounceBan API."""
+
+    BASE_URL = "https://api.bounceban.com"
 
     def __init__(
         self,
-        timeout: int = 10,
-        rate_limit_delay: float = 2.0,
-        from_email: str = "verify@example.com",
+        api_key: str,
+        timeout: int = 30,
+        rate_limit_delay: float = 1.0,
     ):
+        self.api_key = api_key
         self.timeout = timeout
         self.rate_limit_delay = rate_limit_delay
-        self.from_email = from_email
         self._last_request_time = 0
+        self._client = httpx.Client(
+            base_url=self.BASE_URL,
+            headers={"Authorization": api_key},
+            timeout=timeout,
+        )
 
     def generate_permutations(
         self, first_name: str, last_name: str, domain: str
@@ -64,165 +69,112 @@ class EmailFinder:
 
         return permutations
 
-    def get_mx_records(self, domain: str) -> list[str]:
-        """Get MX records for a domain, sorted by priority."""
-        try:
-            answers = dns.resolver.resolve(domain, "MX")
-            mx_records = []
-            for rdata in answers:
-                mx_records.append((rdata.preference, str(rdata.exchange).rstrip(".")))
-            mx_records.sort(key=lambda x: x[0])
-            return [mx[1] for mx in mx_records]
-        except dns.resolver.NXDOMAIN:
-            logger.warning(f"Domain does not exist: {domain}")
-            return []
-        except dns.resolver.NoAnswer:
-            logger.warning(f"No MX records for domain: {domain}")
-            return []
-        except Exception as e:
-            logger.error(f"DNS lookup error for {domain}: {e}")
-            return []
-
     def _rate_limit(self) -> None:
-        """Enforce rate limiting between SMTP requests."""
+        """Enforce rate limiting between API requests."""
         elapsed = time.time() - self._last_request_time
         if elapsed < self.rate_limit_delay:
             time.sleep(self.rate_limit_delay - elapsed)
         self._last_request_time = time.time()
 
     def verify_email(self, email: str) -> EmailVerificationResult:
-        """Verify if an email address exists via SMTP."""
-        domain = email.split("@")[1]
-        mx_records = self.get_mx_records(domain)
+        """Verify if an email address exists via BounceBan API."""
+        self._rate_limit()
 
-        if not mx_records:
+        try:
+            # Start verification
+            response = self._client.get(
+                "/v1/verify/single",
+                params={"email": email},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # If status is pending, poll for result
+            if data.get("status") == "pending":
+                task_id = data.get("id")
+                return self._poll_for_result(email, task_id)
+
+            return self._parse_response(email, data)
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"BounceBan API error for {email}: {e.response.status_code}")
             return EmailVerificationResult(
                 email=email,
                 is_valid=False,
                 is_catch_all=False,
-                smtp_code=None,
-                message="No MX records found",
+                score=None,
+                message=f"API error: {e.response.status_code}",
+            )
+        except httpx.RequestError as e:
+            logger.error(f"BounceBan request error for {email}: {e}")
+            return EmailVerificationResult(
+                email=email,
+                is_valid=False,
+                is_catch_all=False,
+                score=None,
+                message=f"Request error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error verifying {email}: {e}")
+            return EmailVerificationResult(
+                email=email,
+                is_valid=False,
+                is_catch_all=False,
+                score=None,
+                message=str(e),
             )
 
-        self._rate_limit()
+    def _poll_for_result(
+        self, email: str, task_id: str, max_attempts: int = 10
+    ) -> EmailVerificationResult:
+        """Poll for verification result using task ID."""
+        for attempt in range(max_attempts):
+            time.sleep(2)  # Wait between polls
 
-        for mx_host in mx_records[:2]:
             try:
-                result = self._smtp_check(email, mx_host)
-                if result.smtp_code is not None:
-                    return result
+                response = self._client.get(
+                    "/v1/verify/single/status",
+                    params={"id": task_id},
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get("status") != "pending":
+                    return self._parse_response(email, data)
+
             except Exception as e:
-                logger.debug(f"SMTP check failed for {mx_host}: {e}")
+                logger.debug(f"Poll attempt {attempt + 1} failed: {e}")
                 continue
 
         return EmailVerificationResult(
             email=email,
             is_valid=False,
             is_catch_all=False,
-            smtp_code=None,
-            message="All MX servers unreachable",
+            score=None,
+            message="Verification timed out",
         )
 
-    def _smtp_check(self, email: str, mx_host: str) -> EmailVerificationResult:
-        """Perform SMTP handshake to verify email."""
-        try:
-            smtp = smtplib.SMTP(timeout=self.timeout)
-            smtp.connect(mx_host, 25)
-            smtp.helo("mail.example.com")
-            smtp.mail(self.from_email)
-            code, message = smtp.rcpt(email)
-            smtp.quit()
+    def _parse_response(self, email: str, data: dict) -> EmailVerificationResult:
+        """Parse BounceBan API response into EmailVerificationResult."""
+        result = data.get("result", "unknown")
+        score = data.get("score")
+        is_accept_all = data.get("is_accept_all", False)
 
-            message_str = message.decode("utf-8", errors="ignore")
+        # deliverable = valid, risky = might be valid, undeliverable/unknown = invalid
+        is_valid = result in ("deliverable", "risky")
 
-            if code == 250:
-                return EmailVerificationResult(
-                    email=email,
-                    is_valid=True,
-                    is_catch_all=False,
-                    smtp_code=code,
-                    message=message_str,
-                )
-            elif code == 550:
-                return EmailVerificationResult(
-                    email=email,
-                    is_valid=False,
-                    is_catch_all=False,
-                    smtp_code=code,
-                    message=message_str,
-                )
-            elif code == 551 or code == 552 or code == 553:
-                return EmailVerificationResult(
-                    email=email,
-                    is_valid=False,
-                    is_catch_all=False,
-                    smtp_code=code,
-                    message=message_str,
-                )
-            else:
-                return EmailVerificationResult(
-                    email=email,
-                    is_valid=False,
-                    is_catch_all=False,
-                    smtp_code=code,
-                    message=f"Unexpected response: {message_str}",
-                )
-
-        except smtplib.SMTPServerDisconnected:
-            return EmailVerificationResult(
-                email=email,
-                is_valid=False,
-                is_catch_all=False,
-                smtp_code=None,
-                message="Server disconnected",
-            )
-        except smtplib.SMTPConnectError as e:
-            return EmailVerificationResult(
-                email=email,
-                is_valid=False,
-                is_catch_all=False,
-                smtp_code=None,
-                message=f"Connection error: {e}",
-            )
-        except socket.timeout:
-            return EmailVerificationResult(
-                email=email,
-                is_valid=False,
-                is_catch_all=False,
-                smtp_code=None,
-                message="Connection timeout",
-            )
-        except Exception as e:
-            return EmailVerificationResult(
-                email=email,
-                is_valid=False,
-                is_catch_all=False,
-                smtp_code=None,
-                message=str(e),
-            )
-
-    def check_catch_all(self, domain: str) -> bool:
-        """Check if domain has catch-all enabled."""
-        random_email = f"nonexistent.user.xyz123abc@{domain}"
-        result = self.verify_email(random_email)
-        return result.is_valid
+        return EmailVerificationResult(
+            email=email,
+            is_valid=is_valid,
+            is_catch_all=is_accept_all,
+            score=score,
+            message=f"Result: {result}" + (f" (score: {score})" if score else ""),
+        )
 
     def find_valid_email(
         self, first_name: str, last_name: str, domain: str
     ) -> Optional[EmailVerificationResult]:
         """Find a valid email for a person at a domain."""
-        if self.check_catch_all(domain):
-            logger.warning(f"Domain {domain} appears to have catch-all enabled")
-            permutations = self.generate_permutations(first_name, last_name, domain)
-            if permutations:
-                return EmailVerificationResult(
-                    email=permutations[0],
-                    is_valid=True,
-                    is_catch_all=True,
-                    smtp_code=250,
-                    message="Catch-all domain - using best guess",
-                )
-
         permutations = self.generate_permutations(first_name, last_name, domain)
         logger.info(f"Testing {len(permutations)} email permutations for {first_name} {last_name}")
 
@@ -251,3 +203,7 @@ class EmailFinder:
             last_name = parts[-1]
 
         return self.find_valid_email(first_name, last_name, domain)
+
+    def close(self) -> None:
+        """Close the HTTP client."""
+        self._client.close()

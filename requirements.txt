@@ -3,14 +3,11 @@ google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
 google-api-python-client>=2.0.0
 
-# HTTP client for Grok-3 API
+# HTTP client for Grok-3 API and BounceBan API
 httpx>=0.25.0
 
-# DNS lookups for SMTP verification
-dnspython>=2.4.0
-
-# Config file parsing
-pyyaml>=6.0
+# Environment variable loading
+python-dotenv>=1.0.0
 
 # CLI interface
 click>=8.0.0

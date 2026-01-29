@@ -1,12 +1,13 @@
 """Main CLI entry point for the newsletter outreach automation tool."""
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
-import yaml
+from dotenv import load_dotenv
 
 from .drafter import EmailDrafter
 from .email_finder import EmailFinder
@@ -28,77 +29,102 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
     logging.basicConfig(level=level, format=format_str, handlers=handlers)
 
 
-def load_config(config_path: str = "config/config.yaml") -> dict:
-    """Load configuration from YAML file."""
-    path = Path(config_path)
-    if not path.exists():
-        example_path = Path("config/config.example.yaml")
-        if example_path.exists():
-            raise FileNotFoundError(
-                f"Config file not found: {config_path}\n"
-                f"Copy {example_path} to {config_path} and fill in your credentials."
-            )
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+def get_env(key: str, default: str = "") -> str:
+    """Get environment variable with optional default."""
+    return os.getenv(key, default)
 
-    with open(path) as f:
-        return yaml.safe_load(f)
+
+def get_env_float(key: str, default: float) -> float:
+    """Get environment variable as float."""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def get_env_int(key: str, default: int) -> int:
+    """Get environment variable as int."""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 @click.command()
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.option("--dry-run", is_flag=True, help="Don't create drafts, just show what would be done")
-@click.option("--config", "-c", default="config/config.yaml", help="Path to config file")
 @click.option("--max-emails", "-n", default=10, help="Maximum number of emails to process")
-def cli(verbose: bool, dry_run: bool, config: str, max_emails: int) -> None:
+def cli(verbose: bool, dry_run: bool, max_emails: int) -> None:
     """Process Axios Pro Rata newsletters and create outreach drafts."""
-    try:
-        cfg = load_config(config)
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
+    # Load environment variables from .env file
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        example_path = Path(__file__).parent.parent / ".env.example"
+        if example_path.exists():
+            click.echo(
+                f"Error: .env file not found.\n"
+                f"Copy .env.example to .env and fill in your credentials.",
+                err=True,
+            )
+        else:
+            click.echo("Error: .env file not found.", err=True)
+        sys.exit(1)
+
+    load_dotenv(env_path)
+
+    # Validate required environment variables
+    if not get_env("GROK_API_KEY"):
+        click.echo("Error: GROK_API_KEY is not set in .env file", err=True)
         sys.exit(1)
 
     setup_logging(
         verbose=verbose,
-        log_file=cfg.get("logging", {}).get("file"),
+        log_file=get_env("LOG_FILE") or None,
     )
 
     if dry_run:
         click.echo("=== DRY RUN MODE - No drafts will be created ===\n")
 
-    gmail_cfg = cfg.get("gmail", {})
     gmail = GmailClient(
-        credentials_file=gmail_cfg.get("credentials_file", "credentials/credentials.json"),
-        token_file=gmail_cfg.get("token_file", "credentials/token.json"),
+        credentials_file=get_env("GMAIL_CREDENTIALS_FILE", "credentials/credentials.json"),
+        token_file=get_env("GMAIL_TOKEN_FILE", "credentials/token.json"),
     )
 
-    grok_cfg = cfg.get("grok", {})
     parser = NewsletterParser(
-        api_key=grok_cfg.get("api_key", ""),
-        model=grok_cfg.get("model", "grok-3"),
-        base_url=grok_cfg.get("base_url", "https://api.x.ai/v1"),
+        api_key=get_env("GROK_API_KEY"),
+        model=get_env("GROK_MODEL", "grok-3"),
+        base_url=get_env("GROK_BASE_URL", "https://api.x.ai/v1"),
     )
 
-    smtp_cfg = cfg.get("smtp", {})
+    if not get_env("BOUNCEBAN_API_KEY"):
+        click.echo("Error: BOUNCEBAN_API_KEY is not set in .env file", err=True)
+        sys.exit(1)
+
     email_finder = EmailFinder(
-        timeout=smtp_cfg.get("timeout", 10),
-        rate_limit_delay=smtp_cfg.get("rate_limit_delay", 2.0),
-        from_email=smtp_cfg.get("from_email", "verify@example.com"),
+        api_key=get_env("BOUNCEBAN_API_KEY"),
+        timeout=get_env_int("BOUNCEBAN_TIMEOUT", 30),
+        rate_limit_delay=get_env_float("BOUNCEBAN_RATE_LIMIT_DELAY", 1.0),
     )
 
-    email_cfg = cfg.get("email", {})
     drafter = EmailDrafter(
         parser=parser,
-        subject_template=email_cfg.get(
-            "subject_template",
+        subject_template=get_env(
+            "EMAIL_SUBJECT_TEMPLATE",
             "Congrats on the {funding_amount} raise, {founder_first_name}!",
         ),
-        sender_name=email_cfg.get("sender_name", "Your Name"),
+        sender_name=get_env("EMAIL_SENDER_NAME", "Your Name"),
     )
 
     click.echo("Fetching Axios Pro Rata emails...")
     emails = gmail.fetch_axios_emails(
-        sender_filter=gmail_cfg.get("sender_filter", "axios.com"),
-        processed_label=gmail_cfg.get("processed_label", "Axios-Processed"),
+        sender_filter=get_env("GMAIL_SENDER_FILTER", "axios.com"),
+        processed_label=get_env("GMAIL_PROCESSED_LABEL", "Axios-Processed"),
         max_results=max_emails,
     )
 
