@@ -1,0 +1,29 @@
+# Axios Fundings Configuration
+
+# xAI Grok-3 API settings
+grok:
+  api_key: "your-xai-api-key-here"
+  model: "grok-3"
+  base_url: "https://api.x.ai/v1"
+
+# Gmail settings
+gmail:
+  credentials_file: "credentials/credentials.json"
+  token_file: "credentials/token.json"
+  sender_filter: "axios.com"
+  processed_label: "Axios-Processed"
+
+# SMTP verification settings
+smtp:
+  timeout: 10
+  rate_limit_delay: 2.0  # seconds between verifications
+  from_email: "verify@example.com"
+
+# Email template settings
+email:
+  subject_template: "Congrats on the {funding_amount} raise, {founder_first_name}!"
+
+# Logging
+logging:
+  level: "INFO"
+  file: "axios_fundings.log"
